@@ -322,7 +322,7 @@ function Root(props: IProps): React.ReactElement {
     monaco.editor.setModelMarkers(
       model,
       "carciniscript",
-      getRustDiagnostics(code, currentScript.path).map((d) => ({
+      getRustDiagnostics(code, currentScript.path, GetServer(currentScript.hostname)?.scripts).map((d) => ({
         startLineNumber: d.line,
         startColumn: d.column,
         endLineNumber: d.endLine,
@@ -349,7 +349,13 @@ function Root(props: IProps): React.ReactElement {
     updateRustMarkers(newCode);
     let ast;
     try {
-      ast = parseAST(currentScript.path, currentScript.hostname, newCode, getFileType(currentScript.path));
+      ast = parseAST(
+        currentScript.path,
+        currentScript.hostname,
+        newCode,
+        getFileType(currentScript.path),
+        server.scripts,
+      );
       makeModelsForImports(ast, server);
     } catch (error) {
       showRAMError({

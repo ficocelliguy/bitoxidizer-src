@@ -75,7 +75,13 @@ export function getFileTypeFeature(fileType: FileType): FileTypeFeature {
   return result;
 }
 
-export function parseAST(scriptName: string, hostname: string, code: string, fileType: FileType): AST {
+export function parseAST(
+  scriptName: string,
+  hostname: string,
+  code: string,
+  fileType: FileType,
+  scripts?: ReadonlyMap<ScriptFilePath, Script>,
+): AST {
   const fileTypeFeature = getFileTypeFeature(fileType);
   let ast: AST;
   try {
@@ -88,7 +94,10 @@ export function parseAST(scriptName: string, hostname: string, code: string, fil
     } else if (fileType === FileType.RS) {
       // Compile Rust to JS and parse that. The RAM calculator walks the JS, which keeps NS calls as
       // literal `ns.method(...)` member expressions so their costs are found.
-      ast = acorn.parse(compileRust(code, scriptName).scriptCode, { sourceType: "module", ecmaVersion: "latest" });
+      ast = acorn.parse(compileRust(code, scriptName, scripts).scriptCode, {
+        sourceType: "module",
+        ecmaVersion: "latest",
+      });
     } else {
       const plugins: ("jsx" | "typescript")[] = [];
       if (fileTypeFeature.isReact) {

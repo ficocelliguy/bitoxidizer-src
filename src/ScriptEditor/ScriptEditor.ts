@@ -6,6 +6,8 @@ import * as enums from "../Enums";
 import { ns } from "../NetscriptFunctions";
 import { isLegacyScript } from "../Paths/ScriptFilePath";
 import { exceptionAlert } from "../utils/helpers/exceptionAlert";
+import { GetServer } from "../Server/AllServers";
+import { getRustCompletions, getRustHover, getRustSignatureHelp } from "../utils/rust/compileRust";
 
 export class ScriptEditor {
   // Currently, this object is only used for initialization.
@@ -123,6 +125,78 @@ export class ScriptEditor {
 
     monaco.css.cssDefaults.setModeConfiguration({
       ...monaco.css.cssDefaults.modeConfiguration,
+    });
+
+    // Rust: hover and completion from CarciniScript's type checker. Models are named
+    // `<hostname>/<path>`; the server's other scripts resolve `mod` declarations.
+    const rustFile = (model: monaco.editor.ITextModel) => {
+      const path = model.uri.path.replace(/^\//, "");
+      const slash = path.indexOf("/");
+      return { filename: path.slice(slash + 1), scripts: GetServer(path.slice(0, slash))?.scripts };
+    };
+    const kinds = monaco.languages.CompletionItemKind;
+    const rustCompletionKinds = {
+      method: kinds.Method,
+      field: kinds.Field,
+      function: kinds.Function,
+      variable: kinds.Variable,
+      struct: kinds.Struct,
+      enum: kinds.Enum,
+      trait: kinds.Interface,
+      constant: kinds.Constant,
+      module: kinds.Module,
+    };
+    monaco.languages.registerSignatureHelpProvider("rust", {
+      signatureHelpTriggerCharacters: ["(", ","],
+      provideSignatureHelp(model, position) {
+        const { filename, scripts } = rustFile(model);
+        const help = getRustSignatureHelp(model.getValue(), filename, position.lineNumber, position.column, scripts);
+        if (!help) return null;
+        return {
+          value: {
+            signatures: [
+              {
+                label: help.label,
+                documentation: help.documentation ? { value: help.documentation } : undefined,
+                parameters: help.params.map((p) => ({ label: p })),
+              },
+            ],
+            activeSignature: 0,
+            activeParameter: help.active,
+          },
+          dispose: () => undefined,
+        };
+      },
+    });
+    monaco.languages.registerHoverProvider("rust", {
+      provideHover(model, position) {
+        const { filename, scripts } = rustFile(model);
+        const h = getRustHover(model.getValue(), filename, position.lineNumber, position.column, scripts);
+        if (!h) return null;
+        return {
+          range: new monaco.Range(h.line, h.column, h.endLine, h.endColumn),
+          contents: [{ value: h.contents }],
+        };
+      },
+    });
+    monaco.languages.registerCompletionItemProvider("rust", {
+      triggerCharacters: ["."],
+      provideCompletionItems(model, position) {
+        const { filename, scripts } = rustFile(model);
+        const word = model.getWordUntilPosition(position);
+        const range = new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn);
+        const items = getRustCompletions(model.getValue(), filename, position.lineNumber, position.column, scripts);
+        return {
+          suggestions: items.map((c) => ({
+            label: c.label,
+            kind: rustCompletionKinds[c.kind],
+            detail: c.detail,
+            documentation: c.documentation ? { value: c.documentation } : undefined,
+            insertText: c.label,
+            range,
+          })),
+        };
+      },
     });
 
     // Load themes

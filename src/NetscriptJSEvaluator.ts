@@ -97,7 +97,7 @@ function generateLoadedModule(script: Script, scripts: Map<ScriptFilePath, Scrip
       ({ scriptCode, sourceMap } = transformScript(script.code, fileType));
       break;
     case FileType.RS:
-      ({ scriptCode, sourceMap } = compileRust(script.code, script.filename));
+      ({ scriptCode, sourceMap } = compileRust(script.code, script.filename, scripts));
       break;
     default:
       throw new Error(`Invalid file type: ${fileType}. Filename: ${script.filename}, server: ${script.server}.`);

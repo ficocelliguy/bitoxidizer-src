@@ -146,7 +146,7 @@ function parseOnlyRamCalculate(
     const scriptFileType = getFileType(script.filename);
     let moduleAST;
     try {
-      moduleAST = parseAST(script.filename, script.server, script.code, scriptFileType);
+      moduleAST = parseAST(script.filename, script.server, script.code, scriptFileType, otherScripts);
     } catch (error) {
       return {
         errorCode: RamCalculationErrorCode.ImportError,
@@ -548,7 +548,7 @@ export function calculateRamUsage(
 ): RamCalculation {
   try {
     const fileType = getFileType(scriptName);
-    const ast = typeof input === "string" ? parseAST(scriptName, server, input, fileType) : input;
+    const ast = typeof input === "string" ? parseAST(scriptName, server, input, fileType, otherScripts) : input;
     return parseOnlyRamCalculate(ast, scriptName, server, getFileTypeFeature(fileType), otherScripts);
   } catch (error) {
     return {

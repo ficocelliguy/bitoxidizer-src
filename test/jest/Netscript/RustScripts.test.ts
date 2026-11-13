@@ -5,12 +5,14 @@ import { startWorkerScript } from "../../../src/NetscriptWorker";
 import { workerScripts } from "../../../src/Netscript/WorkerScripts";
 import { RunningScript } from "../../../src/Script/RunningScript";
 import { Player } from "@player";
+import { GetServer } from "../../../src/Server/AllServers";
 import { resetPidCounter } from "../../../src/Netscript/Pid";
 import { fixDoImportIssue, initGameEnvironment, setupBasicTestingEnvironment } from "../Utilities";
 import path from "path";
 import { pathToFileURL } from "url";
 import { execFileSync } from "child_process";
 import { config } from "../../../src/NetscriptJSEvaluator";
+import { getRustCompletions, getRustHover } from "../../../src/utils/rust/compileRust";
 
 fixDoImportIssue();
 initGameEnvironment();
@@ -54,6 +56,41 @@ pub fn main() {
       expectCost(calculateRamUsage(code, "fib.rs" as ScriptFilePath, server, new Map()).cost, 0);
     });
 
+    it("doesn't charge for struct fields, methods and locals named like NS functions", () => {
+      const code = `
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Action {
+    Hack,
+    Grow,
+}
+
+struct Plan {
+    hack: u32,
+    grow: u32,
+}
+
+impl Plan {
+    fn hack(&self) -> u32 {
+        self.hack * 2
+    }
+
+    fn run(&self, a: Action) -> u32 {
+        match a {
+            Action::Hack => self.hack(),
+            Action::Grow => self.grow,
+        }
+    }
+}
+
+pub fn main() {
+    let sleep = 3;
+    let plan = Plan { hack: 1, grow: sleep };
+    println!("{} {}", plan.run(Action::Hack), plan.run(Action::Grow));
+}
+`;
+      expectCost(calculateRamUsage(code, "plan.rs" as ScriptFilePath, server, new Map()).cost, 0);
+    });
+
     it("reports compile errors with the Rust location", () => {
       const code = `pub async fn main(ns: NS) {\n    let x = 1;\n    x = 2;\n}\n`;
       const result = calculateRamUsage(code, "bad.rs" as ScriptFilePath, server, new Map());
@@ -78,6 +115,22 @@ pub fn main() {
       expect(errorFor('let m = ns.get_server_max_mony("n00dles");')).toContain(
         "no method named `get_server_max_mony` found for `NS`; did you mean `get_server_max_money`?",
       );
+    });
+
+    it("show NS docs on hover and complete NS methods", () => {
+      const code = `pub async fn main(ns: NS) {
+    let hosts = ns.scan("home");
+    ns.
+}
+`;
+      const h = getRustHover(code, "editor.rs", 2, 21);
+      expect(h?.contents).toContain("fn scan(");
+      expect(h?.contents).toContain("RAM cost");
+      expect(getRustHover(code, "editor.rs", 2, 9)?.contents).toContain("hosts: Vec<String>");
+      const items = getRustCompletions(code, "editor.rs", 3, 8);
+      const hack = items.find((c) => c.label === "hack");
+      expect(hack?.detail).toBe("async fn hack(host?: String, opts?: BasicHGWOptions) -> f64");
+      expect(items.find((c) => c.label === "hacknet")?.kind).toBe("field");
     });
 
     it("types interface fields", () => {
@@ -180,33 +233,172 @@ pub async fn main(ns: NS) {
       expect(runningScript.logs.at(-1)).toBe("Script finished running");
     });
 
-    it("crawls the network with while let and match", async () => {
+    it("ranks servers with closures and iterator adapters", async () => {
       const runningScript = await runRust(
-        "crawl.rs",
+        "rank.rs",
         `
 pub async fn main(ns: NS) {
-    let mut seen: Vec<String> = Vec::new();
-    let mut queue = vec![ns.get_hostname()];
-    let mut open = 0;
-    while let Some(host) = queue.pop() {
-        if seen.contains(&host) {
-            continue;
-        }
-        seen.push(host.clone());
-        for next in ns.scan(&host) {
-            queue.push(next);
-        }
-        match ns.get_server_num_ports_required(&host) as u32 {
-            0 => open += 1,
-            _ => {}
-        }
-    }
-    let first: Option<&String> = seen.first();
-    ns.print(&format!("{} servers, {} open, first {:?}", seen.len(), open, first));
+    let hosts: Vec<String> = ns.scan("home");
+    let mut ranked: Vec<(String, f64)> = hosts
+        .iter()
+        .map(|h| (h.clone(), ns.get_server_max_money(h)))
+        .collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap().then_with(|| a.0.cmp(&b.0)));
+    let total: f64 = ranked.iter().map(|(_, m)| m).sum();
+    let richest = ranked.first().map(|(h, _)| h.clone()).unwrap_or_default();
+    let short = hosts.iter().filter(|h| h.len() < 10).count();
+    ns.print(&format!("{} {} {} {}", ranked.len(), total, richest, short));
 }
 `,
       );
-      expect(runningScript.logs.at(-2)).toMatch(/^\d+ servers, \d+ open, first Some\("home"\)$/);
+      const hosts = Player.getHomeComputer().serversOnNetwork.flatMap((ip) => GetServer(ip) ?? []);
+      const money = hosts.map((s) => [s.hostname, "moneyMax" in s ? s.moneyMax : 0] as const);
+      money.sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+      const total = money.reduce((t, [, m]) => t + m, 0);
+      const short = hosts.filter((s) => s.hostname.length < 10).length;
+      expect(runningScript.logs.at(-2)).toBe(`${hosts.length} ${total} ${money[0][0]} ${short}`);
+      expect(runningScript.ramUsage).toBeGreaterThan(1.6);
+      expect(runningScript.logs.at(-1)).toBe("Script finished running");
+    });
+
+    it("models servers with structs, enums, Result and Display", async () => {
+      const runningScript = await runRust(
+        "targets.rs",
+        `
+use std::fmt;
+
+#[derive(Debug, Clone, PartialEq)]
+enum Verdict {
+    Hack { threads: u32 },
+    Skip(String),
+}
+
+struct Target {
+    host: String,
+    max_money: f64,
+}
+
+impl Target {
+    fn verdict(&self) -> Verdict {
+        if self.max_money > 0.0 {
+            Verdict::Hack { threads: 1 + self.host.len() as u32 }
+        } else {
+            Verdict::Skip(format!("{} has no money", self.host))
+        }
+    }
+}
+
+impl fmt::Display for Target {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{} (\${:.0})", self.host, self.max_money)
+    }
+}
+
+fn parse_threads(s: &str) -> Result<u32, String> {
+    s.parse::<u32>().map_err(|e| format!("{}: {}", s, e))
+}
+
+pub async fn main(ns: NS) {
+    let targets: Vec<Target> = ns
+        .scan("home")
+        .iter()
+        .map(|h| Target { host: h.clone(), max_money: ns.get_server_max_money(h) })
+        .collect();
+    let hackable = targets.iter().filter(|t| matches!(t.verdict(), Verdict::Hack { .. })).count();
+    ns.print(&format!("{} of {} hackable", hackable, targets.len()));
+    ns.print(&format!("{}", targets[0]));
+    ns.print(&format!("{:?} {:?}", parse_threads("8"), parse_threads("x")));
+}
+`,
+      );
+      const hosts = Player.getHomeComputer().serversOnNetwork.flatMap((ip) => GetServer(ip) ?? []);
+      const hackable = hosts.filter((s) => "moneyMax" in s && s.moneyMax > 0).length;
+      const first = hosts[0];
+      const money = "moneyMax" in first ? first.moneyMax : 0;
+      const logs = runningScript.logs
+        .map((l) => String(l))
+        .filter((l) => !l.startsWith("getServerMaxMoney") && !l.startsWith("scan"));
+      expect(logs).toEqual([
+        `${hackable} of ${hosts.length} hackable`,
+        `${first.hostname} ($${money.toFixed(0)})`,
+        `Ok(8) Err("x: invalid digit found in string")`,
+        "Script finished running",
+      ]);
+    });
+
+    it("splits a script across files with `mod`", async () => {
+      Player.getHomeComputer().writeToScriptFile(
+        "lib/targets.rs" as ScriptFilePath,
+        `
+pub struct Target {
+    pub host: String,
+    pub money: f64,
+}
+
+pub fn richest(ns: &NS, hosts: &[String]) -> Option<Target> {
+    hosts
+        .iter()
+        .map(|h| Target { host: h.clone(), money: ns.get_server_max_money(h) })
+        .max_by(|a, b| a.money.partial_cmp(&b.money).unwrap())
+}
+
+pub const LABEL: &str = "richest";
+`,
+      );
+      const runningScript = await runRust(
+        "lib/run.rs",
+        `
+mod targets;
+
+use targets::{richest, Target};
+
+pub async fn main(ns: NS) {
+    let hosts = ns.scan("home");
+    let best: Target = richest(&ns, &hosts).unwrap();
+    ns.print(&format!("{}: {} ({})", targets::LABEL, best.host, best.money));
+}
+`,
+      );
+      const hosts = Player.getHomeComputer().serversOnNetwork.flatMap((ip) => GetServer(ip) ?? []);
+      const money = (s: (typeof hosts)[number]) => ("moneyMax" in s ? s.moneyMax : 0);
+      const best = hosts.reduce((a, b) => (money(b) >= money(a) ? b : a));
+      expect(runningScript.logs.at(-2)).toBe(`richest: ${best.hostname} (${money(best)})`);
+      // scan (0.2 GB) and getServerMaxMoney (0.1 GB, called in the module) on top of the base 1.6 GB.
+      expect(runningScript.ramUsage).toBeCloseTo(1.9);
+    });
+
+    it("crawls the network with a HashSet, while let and a tuple match", async () => {
+      const runningScript = await runRust(
+        "crawl.rs",
+        `
+use std::collections::HashSet;
+
+pub async fn main(ns: NS) {
+    let home = ns.get_hostname();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut queue = vec![(home.clone(), 0u32)];
+    let mut open = 0;
+    let mut deepest = (String::new(), 0);
+    while let Some((host, depth)) = queue.pop() {
+        if !seen.insert(host.clone()) {
+            continue;
+        }
+        if depth > deepest.1 {
+            deepest = (host.clone(), depth);
+        }
+        for next in ns.scan(&host) {
+            queue.push((next, depth + 1));
+        }
+        match (ns.get_server_num_ports_required(&host) as u32, host == home) {
+            (0, false) => open += 1,
+            _ => {}
+        }
+    }
+    ns.print(&format!("{} servers, {} open, home seen {:?}, deepest {}", seen.len(), open, seen.contains(&home), deepest.1));
+}
+`,
+      );
+      expect(runningScript.logs.at(-2)).toMatch(/^\d+ servers, \d+ open, home seen true, deepest \d+$/);
       const summary = String(runningScript.logs.at(-2));
       const [servers, open] = (summary.match(/\d+/g) ?? []).map(Number);
       expect(servers).toBeGreaterThan(10);
