@@ -122,7 +122,7 @@ $ mem hack.js -t 500
 **nano [script]**
 
 Create/Edit a script.
-The name of a script must end with a script extension (.js, .jsx, .ts, .tsx). You can also create a text file with a text extension (.txt, .json, .css).
+The name of a script must end with a script extension (.js, .jsx, .ts, .tsx, .rs). You can also create a text file with a text extension (.txt, .json, .css).
 
 **ps**
 

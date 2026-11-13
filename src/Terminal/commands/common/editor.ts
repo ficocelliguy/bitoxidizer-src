@@ -21,6 +21,11 @@ function getScriptTemplate(path: string): string {
     return "";
   }
   const fileTypeFeature = getFileTypeFeature(getFileType(path));
+  if (fileTypeFeature.isRust) {
+    return `pub async fn main(ns: NS) {
+
+}`;
+  }
   if (fileTypeFeature.isTypeScript) {
     return `export async function main(ns: NS) {
 

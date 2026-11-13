@@ -20,6 +20,8 @@ module.exports = {
     "^monaco-vim$": "<rootDir>/test/__mocks__/NullMock.js",
     "/utils/Protections$": "<rootDir>/test/__mocks__/NullMock.js",
     "@swc/wasm-web": "@swc/core",
+    // The web build initializes asynchronously via import.meta.url; the Node build loads synchronously.
+    "^carciniscript$": "<rootDir>/node_modules/carciniscript/node.cjs",
   },
   restoreMocks: true,
 };

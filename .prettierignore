@@ -25,3 +25,5 @@ src/Documentation/pages.ts
 src/Documentation/data/MathNotationOutput.json
 
 src/Literature/DiscoverableScriptContent/
+
+src/utils/rust/NsBindings.generated.ts

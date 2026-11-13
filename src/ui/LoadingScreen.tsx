@@ -12,6 +12,7 @@ import { ActivateRecoveryMode } from "./React/RecoveryRoot";
 import { commitHash } from "../utils/helpers/commitHash";
 import { pushGameReady } from "../Electron";
 import initSwc from "@swc/wasm-web";
+import { initRust } from "../utils/rust/compileRust";
 
 export function LoadingScreen(): React.ReactElement {
   const [show, setShow] = useState(false);
@@ -34,8 +35,8 @@ export function LoadingScreen(): React.ReactElement {
   });
 
   useEffect(() => {
-    Promise.all([initSwc(), load()])
-      .then(([__, saveData]) => Engine.load(saveData))
+    Promise.all([initSwc(), initRust(), load()])
+      .then(([, , saveData]) => Engine.load(saveData))
       .then(() => {
         pushGameReady();
         setLoaded(true);

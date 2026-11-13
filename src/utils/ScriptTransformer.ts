@@ -3,6 +3,7 @@ import { transformSync, type ParserConfig } from "@swc/wasm-web";
 import * as acorn from "acorn";
 import { resolveScriptFilePath, validScriptExtensions, type ScriptFilePath } from "../Paths/ScriptFilePath";
 import type { Script } from "../Script/Script";
+import { compileRust, RustCompileError } from "./rust/compileRust";
 
 export type AcornASTProgram = acorn.Program;
 export type BabelASTProgram = object;
@@ -17,11 +18,13 @@ export enum FileType {
   TSX,
   NS1,
   CSS,
+  RS,
 }
 
 export interface FileTypeFeature {
   isReact: boolean;
   isTypeScript: boolean;
+  isRust: boolean;
 }
 
 export class ModuleResolutionError extends Error {}
@@ -47,6 +50,8 @@ export function getFileType(filename: string): FileType {
       return FileType.NS1;
     case "css":
       return FileType.CSS;
+    case "rs":
+      return FileType.RS;
     default:
       throw new Error(`Invalid extension: ${extension}. Filename: ${filename}.`);
   }
@@ -56,12 +61,16 @@ export function getFileTypeFeature(fileType: FileType): FileTypeFeature {
   const result: FileTypeFeature = {
     isReact: false,
     isTypeScript: false,
+    isRust: false,
   };
   if (fileType === FileType.JSX || fileType === FileType.TSX) {
     result.isReact = true;
   }
   if (fileType === FileType.TS || fileType === FileType.TSX) {
     result.isTypeScript = true;
+  }
+  if (fileType === FileType.RS) {
+    result.isRust = true;
   }
   return result;
 }
@@ -76,6 +85,10 @@ export function parseAST(scriptName: string, hostname: string, code: string, fil
      */
     if (fileType === FileType.JS) {
       ast = acorn.parse(code, { sourceType: "module", ecmaVersion: "latest" });
+    } else if (fileType === FileType.RS) {
+      // Compile Rust to JS and parse that. The RAM calculator walks the JS, which keeps NS calls as
+      // literal `ns.method(...)` member expressions so their costs are found.
+      ast = acorn.parse(compileRust(code, scriptName).scriptCode, { sourceType: "module", ecmaVersion: "latest" });
     } else {
       const plugins: ("jsx" | "typescript")[] = [];
       if (fileTypeFeature.isReact) {
@@ -94,6 +107,9 @@ export function parseAST(scriptName: string, hostname: string, code: string, fil
       }).program;
     }
   } catch (error) {
+    if (error instanceof RustCompileError) {
+      throw new Error(`Compile error in ${scriptName}, server: ${hostname}. ${error.message}`, { cause: error });
+    }
     /**
      * The message of syntax errors may be cryptic for players without programming experience. For example, some players
      * asked us what "Unexpected token" means. Therefore, we will catch the error here and provide a user-friendly error

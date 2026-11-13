@@ -31,7 +31,8 @@ import { NoOpenScripts } from "./NoOpenScripts";
 import { ScriptEditorContextProvider, useScriptEditorContext } from "./ScriptEditorContext";
 import { useVimEditor } from "./useVimEditor";
 import { useCallback } from "react";
-import { type AST, getFileType, getModuleScript, parseAST } from "../../utils/ScriptTransformer";
+import { type AST, FileType, getFileType, getModuleScript, parseAST } from "../../utils/ScriptTransformer";
+import { getRustDiagnostics } from "../../utils/rust/compileRust";
 import { RamCalculationErrorCode } from "../../Script/RamCalculationErrorCodes";
 import { hasScriptExtension, isLegacyScript, type ScriptFilePath } from "../../Paths/ScriptFilePath";
 import type { BaseServer } from "../../Server/BaseServer";
@@ -310,6 +311,28 @@ function Root(props: IProps): React.ReactElement {
     }
   }
 
+  /** Show CarciniScript compile errors and warnings as editor markers on `.rs` files. */
+  function updateRustMarkers(code: string): void {
+    const model = editorRef.current?.getModel();
+    if (!model || !currentScript) return;
+    if (getFileType(currentScript.path) !== FileType.RS) {
+      monaco.editor.setModelMarkers(model, "carciniscript", []);
+      return;
+    }
+    monaco.editor.setModelMarkers(
+      model,
+      "carciniscript",
+      getRustDiagnostics(code, currentScript.path).map((d) => ({
+        startLineNumber: d.line,
+        startColumn: d.column,
+        endLineNumber: d.endLine,
+        endColumn: Math.max(d.endColumn, d.column + 1),
+        message: d.message,
+        severity: d.severity === "error" ? monaco.MarkerSeverity.Error : monaco.MarkerSeverity.Warning,
+      })),
+    );
+  }
+
   const debouncedCodeParsing = debounce((newCode: string) => {
     let server;
     if (!currentScript || !hasScriptExtension(currentScript.path)) {
@@ -323,6 +346,7 @@ function Root(props: IProps): React.ReactElement {
       });
       return;
     }
+    updateRustMarkers(newCode);
     let ast;
     try {
       ast = parseAST(currentScript.path, currentScript.hostname, newCode, getFileType(currentScript.path));
@@ -334,7 +358,12 @@ function Root(props: IProps): React.ReactElement {
       });
       return;
     }
-    infLoop(ast, newCode);
+    if (getFileType(currentScript.path) === FileType.RS) {
+      // checkInfiniteLoop reports lines of the generated JS, which don't match the Rust source.
+      decorations?.clear();
+    } else {
+      infLoop(ast, newCode);
+    }
     updateRAM(ast, currentScript.path, server);
     finishUpdatingRAM();
   }, 300);

@@ -17,3 +17,4 @@ src/ThirdParty
 webpack.config.js
 
 src/Literature/DiscoverableScriptContent/
+src/utils/rust/NsBindings.generated.ts

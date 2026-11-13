@@ -27,6 +27,7 @@
     "ajv": "^8.18.0",
     "arg": "^5.0.2",
     "bcryptjs": "^2.4.3",
+    "carciniscript": "file:../carciniscript",
     "clsx": "^1.2.1",
     "convert-source-map": "^2.0.0",
     "date-fns": "^2.30.0",
@@ -129,6 +130,7 @@
   "scripts": {
     "analyze-bundle": "webpack --mode production --profile --json > dist/webpack-bundle-stats.json && webpack-bundle-analyzer dist/webpack-bundle-stats.json -m static -r dist/webpack-bundle-report.html --no-open",
     "doc": "bash ./tools/doc.sh",
+    "generate:rust-bindings": "node ./tools/generate-rust-bindings.mjs",
     "format": "prettier -c --write .",
     "format:report": "prettier -c .",
     "start": "electron .app/index.html",

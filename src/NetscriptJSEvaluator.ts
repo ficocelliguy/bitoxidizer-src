@@ -11,6 +11,7 @@ import { LoadedModule, type ScriptURL, type ScriptModule } from "./Script/Loaded
 import type { Script } from "./Script/Script";
 import type { ScriptFilePath } from "./Paths/ScriptFilePath";
 import { FileType, getFileType, getModuleScript, transformScript } from "./utils/ScriptTransformer";
+import { compileRust } from "./utils/rust/compileRust";
 
 // Makes a blob that contains the code of a given script.
 function makeScriptBlob(code: string): Blob {
@@ -94,6 +95,9 @@ function generateLoadedModule(script: Script, scripts: Map<ScriptFilePath, Scrip
     case FileType.TS:
     case FileType.TSX:
       ({ scriptCode, sourceMap } = transformScript(script.code, fileType));
+      break;
+    case FileType.RS:
+      ({ scriptCode, sourceMap } = compileRust(script.code, script.filename));
       break;
     default:
       throw new Error(`Invalid file type: ${fileType}. Filename: ${script.filename}, server: ${script.server}.`);
