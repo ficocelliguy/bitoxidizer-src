@@ -1,10 +1,12 @@
 import type { ScriptFilePath } from "../../../src/Paths/ScriptFilePath";
 import { calculateRamUsage } from "../../../src/Script/RamCalculations";
 import { RamCalculationErrorCode } from "../../../src/Script/RamCalculationErrorCodes";
+import { RamCostConstants } from "../../../src/Netscript/RamCostGenerator";
 import { startWorkerScript } from "../../../src/NetscriptWorker";
 import { workerScripts } from "../../../src/Netscript/WorkerScripts";
 import { RunningScript } from "../../../src/Script/RunningScript";
 import { Player } from "@player";
+import { Settings } from "../../../src/Settings/Settings";
 import { GetServer } from "../../../src/Server/AllServers";
 import { resetPidCounter } from "../../../src/Netscript/Pid";
 import { fixDoImportIssue, initGameEnvironment, setupBasicTestingEnvironment } from "../Utilities";
@@ -12,7 +14,13 @@ import path from "path";
 import { pathToFileURL } from "url";
 import { execFileSync } from "child_process";
 import { config } from "../../../src/NetscriptJSEvaluator";
-import { getRustCompletions, getRustHover } from "../../../src/utils/rust/compileRust";
+import {
+  getRustCompletions,
+  getRustDefinition,
+  getRustHover,
+  getRustReferences,
+  getRustRename,
+} from "../../../src/utils/rust/compileRust";
 
 fixDoImportIssue();
 initGameEnvironment();
@@ -54,6 +62,34 @@ pub fn main() {
 }
 `;
       expectCost(calculateRamUsage(code, "fib.rs" as ScriptFilePath, server, new Map()).cost, 0);
+    });
+
+    it("charges the DOM cost for js::document() and js::window()", () => {
+      const doc = `
+pub fn main() {
+    let title = js::document().title;
+    println!("{}", title);
+}
+`;
+      expectCost(calculateRamUsage(doc, "doc.rs" as ScriptFilePath, server, new Map()).cost, RamCostConstants.Dom);
+      const win = `
+use js::window;
+
+pub fn main() {
+    println!("{}", window().inner_width);
+}
+`;
+      expectCost(calculateRamUsage(win, "win.rs" as ScriptFilePath, server, new Map()).cost, RamCostConstants.Dom);
+      // The browser-free globals are free, and so is std::time (on performance.now()).
+      const free = `
+use std::time::Instant;
+
+pub fn main() {
+    let start = Instant::now();
+    println!("{} {} {:.2?}", js::Date::now(), js::btoa("x"), start.elapsed());
+}
+`;
+      expectCost(calculateRamUsage(free, "free.rs" as ScriptFilePath, server, new Map()).cost, 0);
     });
 
     it("doesn't charge for struct fields, methods and locals named like NS functions", () => {
@@ -129,8 +165,31 @@ pub fn main() {
       expect(getRustHover(code, "editor.rs", 2, 9)?.contents).toContain("hosts: Vec<String>");
       const items = getRustCompletions(code, "editor.rs", 3, 8);
       const hack = items.find((c) => c.label === "hack");
-      expect(hack?.detail).toBe("async fn hack(host?: String, opts?: BasicHGWOptions) -> f64");
+      expect(hack?.detail).toBe("async fn hack(host?: &str, opts?: BasicHGWOptions) -> f64");
       expect(items.find((c) => c.label === "hacknet")?.kind).toBe("field");
+    });
+
+    it("finds definitions, references and renames across scripts", () => {
+      const util = `pub fn helper() -> i32 {
+    1
+}
+`;
+      const main = `mod util;
+use util::helper;
+pub async fn main(ns: NS) {
+    ns.print(&format!("{}", helper()));
+}
+`;
+      // Only `code` is read from a server's scripts.
+      const scripts = new Map([
+        ["nav/util.rs", { code: util }],
+        ["nav/main.rs", { code: main }],
+      ]) as unknown as Parameters<typeof getRustReferences>[4];
+      const d = getRustDefinition(main, "nav/main.rs", 4, 29, scripts);
+      expect(d && `${d.file} ${d.line}:${d.column}`).toBe("nav/util.rs 1:8");
+      const refs = getRustReferences(main, "nav/main.rs", 4, 29, scripts).map((l) => `${l.file} ${l.line}:${l.column}`);
+      expect(refs).toEqual(["nav/main.rs 2:11", "nav/main.rs 4:29", "nav/util.rs 1:8"]);
+      expect(getRustRename(main, "nav/main.rs", 4, 29, "assist", scripts)).toHaveLength(3);
     });
 
     it("types interface fields", () => {
@@ -367,6 +426,116 @@ pub async fn main(ns: NS) {
       expect(runningScript.ramUsage).toBeCloseTo(1.9);
     });
 
+    it("reaches modules in folders through `pub mod`", async () => {
+      const home = Player.getHomeComputer();
+      home.writeToScriptFile("lib/geo.rs" as ScriptFilePath, "pub mod shapes;\n");
+      home.writeToScriptFile(
+        "lib/geo/shapes.rs" as ScriptFilePath,
+        `
+pub fn area(side: f64) -> f64 {
+    side * side
+}
+
+pub fn ram(ns: &NS) -> f64 {
+    ns.get_server_max_ram("home")
+}
+`,
+      );
+      const runningScript = await runRust(
+        "lib/nested.rs",
+        `
+mod geo;
+
+use geo::shapes::area;
+
+pub async fn main(ns: NS) {
+    ns.print(&format!("{} {}", area(3.0), geo::shapes::ram(&ns) > 0.0));
+}
+`,
+      );
+      expect(runningScript.logs.at(-2)).toBe("9 true");
+      // getServerMaxRam (0.05 GB), called two modules down, on top of the base 1.6 GB.
+      expect(runningScript.ramUsage).toBeCloseTo(1.65);
+    });
+
+    it("expands a proc macro from another script", async () => {
+      const home = Player.getHomeComputer();
+      home.writeToScriptFile(
+        "pm/mac.rs" as ScriptFilePath,
+        `
+use proc_macro::TokenStream;
+
+#[proc_macro_derive(Named)]
+pub fn named(input: TokenStream) -> TokenStream {
+    let src = input.to_string();
+    let name = src.split_whitespace().skip_while(|w| *w != "struct").nth(1).unwrap().trim_end_matches(';').to_string();
+    format!("impl {name} {{ fn name() -> &'static str {{ {:?} }} }}", name).parse().unwrap()
+}
+
+#[proc_macro]
+pub fn twice(input: TokenStream) -> TokenStream {
+    format!("({input}) * 2").parse().unwrap()
+}
+`,
+      );
+      const runningScript = await runRust(
+        "pm/main.rs",
+        `
+use mac::{twice, Named};
+
+#[derive(Named)]
+struct Server;
+
+pub async fn main(ns: NS) {
+    ns.print(&format!("{} {}", Server::name(), twice!(20 + 1)));
+}
+`,
+      );
+      expect(runningScript.logs.at(-2)).toBe("Server 42");
+
+      // Changing the macro recompiles the script that uses it (which itself is unchanged).
+      const mac = home.scripts.get("pm/mac.rs" as ScriptFilePath);
+      if (!mac) throw new Error("mac.rs was not written");
+      home.writeToScriptFile("pm/mac.rs" as ScriptFilePath, mac.code.replace("* 2", "* 3"));
+      const main = home.scripts.get("pm/main.rs" as ScriptFilePath);
+      if (!main) throw new Error("main.rs was not written");
+      const again = new RunningScript(main, main.getRamUsage(home.scripts) ?? 0);
+      const pid = startWorkerScript(again, home);
+      const worker = workerScripts.get(pid);
+      if (!worker) throw new Error("worker script did not start");
+      await new Promise<void>((resolve) => (worker.atExit = new Map([["default", resolve]])));
+      expect(again.logs.at(-2)).toBe("Server 63");
+    });
+
+    it("saves state as JSON and reads it back with js::JSON", async () => {
+      const runningScript = await runRust(
+        "state.rs",
+        `
+use js::{Date, JSON};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct State {
+    target_host: String,
+    hack_count: u32,
+    started: f64,
+}
+
+pub async fn main(ns: NS) {
+    let state = State { target_host: "n00dles".to_string(), hack_count: 3, started: Date::from_millis(0.0).get_time() };
+    ns.write("state.json", &JSON::stringify(&state), "w");
+    let text = ns.read("state.json");
+    let back: State = JSON::parse(&text).unwrap();
+    ns.print(&format!("{} {:?}", text, back));
+}
+`,
+      );
+      expect(runningScript.logs.at(-2)).toBe(
+        '{"targetHost":"n00dles","hackCount":3,"started":0.0} State { target_host: "n00dles", hack_count: 3, started: 0.0 }',
+      );
+    });
+
     it("crawls the network with a HashSet, while let and a tuple match", async () => {
       const runningScript = await runRust(
         "crawl.rs",
@@ -423,6 +592,29 @@ pub async fn main(ns: NS) {
       consoleError.mockRestore();
       expect(runningScript.logs[0]).toBe("before");
       expect(runningScript.logs.join("\n")).toContain("panicked at panics.rs:6:9:\ncannot divide by 0");
+    });
+
+    it("panics on integer overflow when the setting asks for debug-build checks", async () => {
+      const consoleError = jest.spyOn(console, "error").mockImplementation(jest.fn());
+      Settings.RustOverflowChecks = true;
+      try {
+        const runningScript = await runRust(
+          "overflows.rs",
+          `
+pub async fn main(ns: NS) {
+    let mut level: u8 = 250;
+    for _ in 0..10 {
+        level += 1;
+    }
+    ns.print(&format!("{}", level));
+}
+`,
+        );
+        expect(runningScript.logs.join("\n")).toContain("panicked at overflows.rs:5:9:\nattempt to add with overflow");
+      } finally {
+        Settings.RustOverflowChecks = false;
+        consoleError.mockRestore();
+      }
     });
   });
 });

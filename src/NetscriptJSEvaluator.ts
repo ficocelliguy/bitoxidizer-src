@@ -96,9 +96,13 @@ function generateLoadedModule(script: Script, scripts: Map<ScriptFilePath, Scrip
     case FileType.TSX:
       ({ scriptCode, sourceMap } = transformScript(script.code, fileType));
       break;
-    case FileType.RS:
-      ({ scriptCode, sourceMap } = compileRust(script.code, script.filename, scripts));
+    case FileType.RS: {
+      let dependencies: string[];
+      ({ scriptCode, sourceMap, dependencies } = compileRust(script.code, script.filename, scripts));
+      // A proc-macro crate isn't imported at run time: changing it must still recompile this.
+      for (const path of dependencies) scripts.get(path as ScriptFilePath)?.dependents.add(script);
       break;
+    }
     default:
       throw new Error(`Invalid file type: ${fileType}. Filename: ${script.filename}, server: ${script.server}.`);
   }

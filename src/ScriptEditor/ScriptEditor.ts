@@ -4,10 +4,20 @@ import { Settings } from "../Settings/Settings";
 import { NetscriptExtra } from "../NetscriptFunctions/Extra";
 import * as enums from "../Enums";
 import { ns } from "../NetscriptFunctions";
-import { isLegacyScript } from "../Paths/ScriptFilePath";
+import { isLegacyScript, type ScriptFilePath } from "../Paths/ScriptFilePath";
 import { exceptionAlert } from "../utils/helpers/exceptionAlert";
 import { GetServer } from "../Server/AllServers";
-import { getRustCompletions, getRustHover, getRustSignatureHelp } from "../utils/rust/compileRust";
+import {
+  getRustCompletions,
+  getRustDefinition,
+  getRustHover,
+  getRustReferences,
+  getRustRename,
+  getRustSignatureHelp,
+} from "../utils/rust/compileRust";
+import { Page, Router } from "../ui/Router";
+import { openScripts } from "./EditorData";
+import type { ContentFilePath } from "../Paths/ContentFile";
 
 export class ScriptEditor {
   // Currently, this object is only used for initialization.
@@ -196,6 +206,92 @@ export class ScriptEditor {
             range,
           })),
         };
+      },
+    });
+
+    // Go to definition, references and rename. Another script's model has the URI
+    // `/<hostname>/<path>`, like the open tabs' models.
+    const otherFile = (model: monaco.editor.ITextModel, file: string) =>
+      model.uri.with({ path: `/${model.uri.path.replace(/^\//, "").split("/")[0]}/${file}` });
+    monaco.languages.registerDefinitionProvider("rust", {
+      provideDefinition(model, position) {
+        const { filename, scripts } = rustFile(model);
+        const d = getRustDefinition(model.getValue(), filename, position.lineNumber, position.column, scripts);
+        if (!d) return null;
+        const uri = d.file === filename ? model.uri : otherFile(model, d.file);
+        return { uri, range: new monaco.Range(d.line, d.column, d.endLine, d.endColumn) };
+      },
+    });
+    monaco.languages.registerReferenceProvider("rust", {
+      provideReferences(model, position) {
+        const { filename, scripts } = rustFile(model);
+        return getRustReferences(model.getValue(), filename, position.lineNumber, position.column, scripts).map(
+          (l) => ({
+            uri: l.file === filename ? model.uri : otherFile(model, l.file),
+            range: new monaco.Range(l.line, l.column, l.endLine, l.endColumn),
+          }),
+        );
+      },
+    });
+    monaco.languages.registerRenameProvider("rust", {
+      provideRenameEdits(model, position, newName) {
+        const { filename, scripts } = rustFile(model);
+        const spots = getRustRename(model.getValue(), filename, position.lineNumber, position.column, newName, scripts);
+        if (spots.length === 0) {
+          return { edits: [], rejectReason: "Only a name defined in your scripts can be renamed, to a valid identifier" };
+        }
+        const range = (l: (typeof spots)[number]) => new monaco.Range(l.line, l.column, l.endLine, l.endColumn);
+        // Other scripts: their open tab's model, else the script on the server, changed right away.
+        const hostname = model.uri.path.replace(/^\//, "").split("/")[0];
+        const server = GetServer(hostname);
+        for (const file of new Set(spots.filter((l) => l.file !== filename).map((l) => l.file))) {
+          const edits = spots.filter((l) => l.file === file).map((l) => ({ range: range(l), text: newName }));
+          const open = monaco.editor.getModel(otherFile(model, file));
+          if (open) {
+            open.pushEditOperations([], edits, () => null);
+            continue;
+          }
+          const script = server?.scripts.get(file as ScriptFilePath);
+          if (!server || !script) continue;
+          const temp = monaco.editor.createModel(script.code, "rust");
+          temp.applyEdits(edits);
+          server.writeToScriptFile(file as ScriptFilePath, temp.getValue());
+          temp.dispose();
+        }
+        return {
+          edits: spots
+            .filter((l) => l.file === filename)
+            .map((l) => ({
+              resource: model.uri,
+              versionId: model.getVersionId(),
+              textEdit: { range: range(l), text: newName },
+            })),
+        };
+      },
+    });
+    // A definition in another script opens it in a new tab (or switches to it).
+    monaco.editor.registerEditorOpener({
+      openCodeEditor(_source, resource, selectionOrPosition) {
+        const path = resource.path.replace(/^\//, "");
+        const slash = path.indexOf("/");
+        const hostname = path.slice(0, slash);
+        const file = path.slice(slash + 1) as ContentFilePath;
+        const server = GetServer(hostname);
+        const script = server?.scripts.get(file as ScriptFilePath);
+        if (!server || !script) return false;
+        const at =
+          selectionOrPosition && "startLineNumber" in selectionOrPosition
+            ? new monaco.Position(selectionOrPosition.startLineNumber, selectionOrPosition.startColumn)
+            : selectionOrPosition && "lineNumber" in selectionOrPosition
+            ? new monaco.Position(selectionOrPosition.lineNumber, selectionOrPosition.column)
+            : null;
+        const open = openScripts.find((s) => s.path === file && s.hostname === hostname);
+        if (open && at) open.lastPosition = at;
+        Router.toPage(Page.ScriptEditor, {
+          files: new Map([[file, script.code]]),
+          options: { hostname, vim: Settings.MonacoDefaultToVim },
+        });
+        return true;
       },
     });
 

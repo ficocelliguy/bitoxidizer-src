@@ -54,11 +54,14 @@ export class Script extends ContentFile {
     this.ramUsage = null;
     this.ramUsageEntries.length = 0;
     this.ramCalculationError = null;
+    // Dependents first: a Rust proc-macro crate is never loaded itself, but the scripts compiled
+    // with it are. (Cleared before recursing, so import cycles end.)
+    const dependents = [...this.dependents];
+    this.dependents.clear();
+    for (const dependent of dependents) dependent.invalidateModule();
     // Early return if there's already no URL
     if (!this.mod) return;
     this.mod = null;
-    for (const dependent of this.dependents) dependent.invalidateModule();
-    this.dependents.clear();
     // This will be mutated in compile(), but is immutable after that.
     // (No RunningScripts can access this copy before that point).
     this.dependencies = new Map();

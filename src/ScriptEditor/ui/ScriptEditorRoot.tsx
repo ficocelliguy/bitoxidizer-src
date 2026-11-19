@@ -327,7 +327,7 @@ function Root(props: IProps): React.ReactElement {
         startColumn: d.column,
         endLineNumber: d.endLine,
         endColumn: Math.max(d.endColumn, d.column + 1),
-        message: d.message,
+        message: d.help ? `${d.message}\n\n${d.help}` : d.message,
         severity: d.severity === "error" ? monaco.MarkerSeverity.Error : monaco.MarkerSeverity.Warning,
       })),
     );

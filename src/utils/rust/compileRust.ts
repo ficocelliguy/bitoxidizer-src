@@ -4,15 +4,22 @@ import {
   hover,
   completions,
   signatureHelp,
+  definition,
+  references,
+  rename,
   setNsBindings,
+  setOverflowChecks,
+  setStrictBorrows,
   type Completion,
   type SignatureHelp,
   type Diagnostic,
   type Hover,
+  type Location,
 } from "carciniscript";
 // Installs globalThis.κσ, the runtime helpers that compiled Rust scripts call.
 import "carciniscript/runtime";
 import { nsBindings } from "./NsBindings.generated";
+import { Settings } from "../../Settings/Settings";
 import type { Script } from "../../Script/Script";
 import type { ScriptFilePath } from "../../Paths/ScriptFilePath";
 
@@ -50,7 +57,9 @@ export class RustCompileError extends Error {
 }
 
 export function formatRustDiagnostic(filename: string, d: Diagnostic): string {
-  return `${filename}:${d.line}:${d.column}: ${d.message}`;
+  const first = `${filename}:${d.line}:${d.column}: ${d.message}`;
+  // The help line (the rule, for players who don't know Rust) on a second, indented line.
+  return d.help ? `${first}\n    ${d.help}` : first;
 }
 
 /**
@@ -62,8 +71,10 @@ export function compileRust(
   code: string,
   filename: string,
   scripts?: Scripts,
-): { scriptCode: string; sourceMap: string; diagnostics: Diagnostic[] } {
+): { scriptCode: string; sourceMap: string; diagnostics: Diagnostic[]; dependencies: string[] } {
   ensureBindings();
+  setOverflowChecks(true);
+  setStrictBorrows(true);
   const out = compile(code, filename, resolverFor(scripts));
   if (out.code === null || out.sourceMap === null) {
     const errors = out.diagnostics.filter((d) => d.severity === "error");
@@ -72,7 +83,13 @@ export function compileRust(
     const message = first ? `${formatRustDiagnostic(filename, first)}${more}` : `${filename}: compilation failed`;
     throw new RustCompileError(message, out.diagnostics);
   }
-  return { scriptCode: out.code, sourceMap: out.sourceMap, diagnostics: out.diagnostics };
+  return {
+    scriptCode: out.code,
+    sourceMap: out.sourceMap,
+    diagnostics: out.diagnostics,
+    // Proc-macro crates it used (its `mod` files are JS imports, tracked like any other).
+    dependencies: out.dependencies,
+  };
 }
 
 /** Hover text (markdown) at a 1-based line and column, for the editor. */
@@ -115,4 +132,46 @@ export function getRustSignatureHelp(
 export function getRustDiagnostics(code: string, filename: string, scripts?: Scripts): Diagnostic[] {
   ensureBindings();
   return compile(code, filename, resolverFor(scripts)).diagnostics;
+}
+
+/** Where the name at a 1-based line and column is defined (in this file or another script). */
+export function getRustDefinition(
+  code: string,
+  filename: string,
+  line: number,
+  column: number,
+  scripts?: Scripts,
+): Location | null {
+  ensureBindings();
+  return definition(code, filename, line, column, resolverFor(scripts));
+}
+
+/** The `.rs` scripts of a server, which references and renames search too. */
+function rustPaths(scripts: Scripts | undefined): string[] {
+  return [...(scripts?.keys() ?? [])].filter((p) => p.endsWith(".rs"));
+}
+
+/** Every use of the name at a 1-based line and column, its declaration included, in this and the server's other `.rs` scripts. */
+export function getRustReferences(
+  code: string,
+  filename: string,
+  line: number,
+  column: number,
+  scripts?: Scripts,
+): Location[] {
+  ensureBindings();
+  return references(code, filename, line, column, resolverFor(scripts), rustPaths(scripts));
+}
+
+/** The ranges to replace with `newName` to rename the name at a 1-based line and column, in this and the server's other `.rs` scripts. */
+export function getRustRename(
+  code: string,
+  filename: string,
+  line: number,
+  column: number,
+  newName: string,
+  scripts?: Scripts,
+): Location[] {
+  ensureBindings();
+  return rename(code, filename, line, column, newName, resolverFor(scripts), rustPaths(scripts));
 }
